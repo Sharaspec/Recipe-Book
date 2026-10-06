@@ -2,7 +2,8 @@
 
 A responsive recipe book of top-rated Southern recipes, shown as easy-to-read recipe cards and printable recipe sheets.
 
-- **Accounts**: users create a username and password to sign in.
+- **Landing page**: visitors who aren't signed in see a home page first, not the sign-in screen. It has food photos, a preview of 8 recipes (title, rating, time and servings), what the app does, and "Get started" / "Sign in" buttons. Full ingredients and instructions still need an account.
+- **Accounts**: users create a username and password to sign in, at `/#/signup` or `/#/login`. If someone opens a recipe link while signed out, they're taken back to that recipe after signing in.
 - **Favorites**: tap ♥ to save a recipe; the Favorites tab lists them.
 - **Remove recipes you don't like**: tap ✕ ("Not for me") to take a recipe out of your book. The Hidden tab lets you restore it.
 - **Themes**: Light, Dark, or System (follows your device setting), using the switch in the header.
@@ -41,6 +42,10 @@ The 14 recipes were collected with [Firecrawl](https://www.firecrawl.dev/) from 
 | Southern Sweet Potato Pie | Add a Pinch | 5.0 (228) |
 
 Admins add, edit and delete recipes from the Admin page. `data/recipes.json` is only the starting set: it's loaded the first time the site runs. After that, recipes live in Netlify Blobs, and admin changes are saved there.
+
+### Photos
+
+The landing page uses freely licensed food photos from [Wikimedia Commons](https://commons.wikimedia.org/). They show each dish in general; they aren't from the recipe authors, several of whom ask that their content not be reused. Each photo is credited with its license under **Photo credits** at the bottom of the landing page. The list of photos is in `public/js/landing.js`. If a photo ever fails to load, its card falls back to the gingham pattern.
 
 ## How it's built
 

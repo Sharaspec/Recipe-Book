@@ -280,7 +280,7 @@ export async function renderShared(username, h) {
     ${
       h.state.user
         ? ""
-        : `<div class="cta-banner"><span>Want the full recipes and your own favorites list?</span><a class="btn btn-primary btn-sm" href="#/">Create a free account</a></div>`
+        : `<div class="cta-banner"><span>Want the full recipes and your own favorites list?</span><a class="btn btn-primary btn-sm" href="#/signup">Create a free account</a></div>`
     }
     ${
       data.recipes.length

@@ -231,6 +231,26 @@ function cleanRecipe(input) {
   return { recipe: r };
 }
 
+// Public teaser for the landing page: summary fields only, never ingredients or steps.
+async function previewRecipes() {
+  const recipes = await getRecipes();
+  return json(
+    200,
+    recipes.map(({ id, title, category, description, rating, ratingCount, totalTime, servings, sourceName }) => ({
+      id,
+      title,
+      category,
+      description,
+      rating,
+      ratingCount,
+      totalTime,
+      servings,
+      sourceName,
+    })),
+    { "cache-control": "public, max-age=300" },
+  );
+}
+
 async function listRecipes() {
   return json(200, await getRecipes());
 }
@@ -472,6 +492,8 @@ export default async (req) => {
     if (path === "/signup" && method === "POST") return await signup(req);
     if (path === "/login" && method === "POST") return await login(req);
     if (path === "/logout" && method === "POST") return logout(req);
+
+    if (path === "/preview" && method === "GET") return await previewRecipes();
 
     let m = path.match(/^\/shared\/([a-zA-Z0-9_.-]{3,24})$/);
     if (m && method === "GET") return await sharedFavorites(m[1]);

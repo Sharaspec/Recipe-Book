@@ -1,6 +1,7 @@
 // Southern Recipe Book — single-page app (hash routing, no build step).
 import { renderAdmin } from "./admin.js";
 import { renderProfile, renderShared, avatarHTML } from "./profile.js";
+import { renderLanding } from "./landing.js";
 
 const CATEGORIES = ["All", "Mains", "Sides", "Breads", "Desserts"];
 const CAT_VAR = { Mains: "--cat-mains", Sides: "--cat-sides", Breads: "--cat-breads", Desserts: "--cat-desserts" };
@@ -10,6 +11,7 @@ const state = {
   recipes: [],
   query: "",
   category: "All",
+  returnTo: null, // page to open after signing in
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -177,14 +179,13 @@ function setActiveNav(name) {
 
 function renderAuth(mode = "login", error = "") {
   document.body.classList.remove("signed-in");
-  $("#site-footer").hidden = true;
   const signup = mode === "signup";
   main.innerHTML = `
     <div class="auth-wrap">
       <div class="auth-card">
         <div class="auth-hero gingham">
-          <h1>Pull up a chair, y'all.</h1>
-          <p>The South's top-rated recipes, all in one book. Sign in to save your favorites.</p>
+          <h1>${signup ? "Pull up a chair, y'all." : "Welcome back!"}</h1>
+          <p>${signup ? "Create a free account to see every recipe and save your favorites." : "Sign in to get back to your recipe book."}</p>
         </div>
         <div class="auth-body">
           <div class="auth-tabs" role="tablist">
@@ -213,11 +214,18 @@ function renderAuth(mode = "login", error = "") {
             }
             <button class="btn btn-primary" type="submit">${signup ? "Create my account" : "Sign in"}</button>
           </form>
+          <p class="auth-back"><a href="#/">← Back to the home page</a></p>
         </div>
       </div>
     </div>`;
 
-  main.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => renderAuth(b.dataset.mode)));
+  // Switching tabs updates the address (#/login or #/signup) so refresh and back work.
+  main.querySelectorAll("[data-mode]").forEach((b) =>
+    b.addEventListener("click", () => {
+      history.replaceState(null, "", `#/${b.dataset.mode}`);
+      renderAuth(b.dataset.mode);
+    }),
+  );
   const form = $("#auth-form");
   $("#username").focus();
   form.addEventListener("submit", async (e) => {
@@ -470,6 +478,12 @@ function saveChecks(id) {
 // ---------- Routing ----------
 
 function render() {
+  renderPage();
+  // Remember the page we ended up on (redirects use replaceState, which fires no hashchange).
+  lastHash = location.hash;
+}
+
+function renderPage() {
   const hash = location.hash.replace(/^#/, "") || "/";
   // Shared favorites pages are public: they work signed in or not.
   const shared = hash.match(/^\/u\/([^/]+)$/);
@@ -478,7 +492,18 @@ function render() {
     if (state.user) updateCounts();
     return renderShared(decodeURIComponent(shared[1]), profileHelpers);
   }
-  if (!state.user) return renderAuth();
+  if (!state.user) {
+    if (hash === "/") return renderLanding(landingHelpers);
+    if (hash === "/login" || hash === "/signup") return renderAuth(hash.slice(1));
+    // Any other page needs an account: sign in first, then come back here.
+    state.returnTo = `#${hash}`;
+    history.replaceState(null, "", "#/login");
+    return renderAuth("login");
+  }
+  if (hash === "/login" || hash === "/signup") {
+    history.replaceState(null, "", "#/");
+    return renderList("all");
+  }
   updateCounts();
   if (hash === "/profile") {
     setActiveNav(null);
@@ -533,10 +558,12 @@ const profileHelpers = {
   onAccountDeleted: () => {
     resetSession();
     history.replaceState(null, "", "#/");
-    renderAuth("login");
+    render();
     toast("Your account was deleted. Sorry to see you go!");
   },
 };
+
+const landingHelpers = { main, api, esc, state, catColor, stars, icons };
 
 function updateHeaderUser() {
   const u = state.user;
@@ -545,6 +572,7 @@ function updateHeaderUser() {
 }
 
 function resetSession() {
+  document.body.classList.remove("signed-in");
   state.user = null;
   state.query = "";
   state.category = "All";
@@ -565,13 +593,11 @@ window.addEventListener("hashchange", () => {
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
   }
-  lastHash = location.hash;
 });
 
 async function signedIn() {
   document.body.classList.add("signed-in");
   updateHeaderUser();
-  $("#site-footer").hidden = false;
   main.innerHTML = `<div class="loading">Gathering recipes…</div>`;
   try {
     await loadRecipes();
@@ -580,11 +606,17 @@ async function signedIn() {
     main.innerHTML = `<div class="empty"><h2>Couldn't load recipes</h2><p>Please refresh the page.</p></div>`;
     return;
   }
+  // Coming from the sign-in page: go where the visitor was headed, or to the recipes.
+  if (["#/login", "#/signup"].includes(location.hash)) {
+    history.replaceState(null, "", state.returnTo || "#/");
+  }
+  state.returnTo = null;
   render();
 }
 
 function signedOut() {
   resetSession();
+  history.replaceState(null, "", "#/login");
   renderAuth("login", "Your session ended. Please sign in again.");
 }
 
@@ -596,7 +628,8 @@ $("#logout-btn").addEventListener("click", async () => {
   }
   resetSession();
   history.replaceState(null, "", "#/");
-  renderAuth();
+  render();
+  toast("You're signed out. Come back soon!");
 });
 
 // ---------- Boot ----------
