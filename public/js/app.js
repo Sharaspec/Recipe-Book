@@ -1,4 +1,5 @@
 // Southern Recipe Book — single-page app (hash routing, no build step).
+import { renderAdmin } from "./admin.js";
 
 const CATEGORIES = ["All", "Mains", "Sides", "Breads", "Desserts"];
 const CAT_VAR = { Mains: "--cat-mains", Sides: "--cat-sides", Breads: "--cat-breads", Desserts: "--cat-desserts" };
@@ -22,6 +23,8 @@ function esc(str) {
 const catColor = (cat) => `var(${CAT_VAR[cat] || "--accent"})`;
 
 function stars(rating, count) {
+  if (rating == null || !Number.isFinite(rating)) return "";
+  count = count || 0;
   const pct = Math.max(0, Math.min(100, (rating / 5) * 100));
   return `<span class="rating" aria-label="Rated ${rating.toFixed(1)} out of 5 from ${count.toLocaleString()} ratings">
     <span class="stars" aria-hidden="true"><span style="width:${pct}%"></span></span>
@@ -155,8 +158,11 @@ function restoreRecipe(id) {
 
 function updateCounts() {
   if (!state.user) return;
-  $("#fav-count").textContent = state.user.favorites.length;
-  $("#hidden-count").textContent = state.user.hidden.length;
+  // Only count recipes that still exist (an admin may have deleted some).
+  const ids = new Set(state.recipes.map((r) => r.id));
+  $("#fav-count").textContent = state.user.favorites.filter((id) => ids.has(id)).length;
+  $("#hidden-count").textContent = state.user.hidden.filter((id) => ids.has(id)).length;
+  $("#admin-link").hidden = !state.user.isAdmin;
 }
 
 function setActiveNav(name) {
@@ -406,11 +412,7 @@ function renderRecipe(id) {
           }
         </section>
       </div>
-      <footer class="attribution">
-        Recipe by <strong>${esc(r.author)}</strong> · Originally published at
-        <a href="${esc(r.sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(r.sourceName)}</a>.
-        Visit the original for photos, videos and the full story.
-      </footer>
+      ${attributionHTML(r)}
     </article>`;
 
   bindCardActions(main);
@@ -429,6 +431,18 @@ function renderRecipe(id) {
       }
     });
   });
+}
+
+function attributionHTML(r) {
+  if (!r.author && !r.sourceName) return "";
+  const by = r.author ? `Recipe by <strong>${esc(r.author)}</strong>` : "";
+  const safeUrl = /^https?:\/\//i.test(r.sourceUrl || "") ? r.sourceUrl : "";
+  const src = r.sourceName
+    ? `${by ? " · " : ""}Originally published at ${
+        safeUrl ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer">${esc(r.sourceName)}</a>` : esc(r.sourceName)
+      }.${safeUrl ? " Visit the original for photos, videos and the full story." : ""}`
+    : ".";
+  return `<footer class="attribution">${by}${src}</footer>`;
 }
 
 // Cooking progress (checked ingredients / finished steps) is a per-device convenience.
@@ -459,29 +473,64 @@ function render() {
   if (recipeMatch) return renderRecipe(recipeMatch[1]);
   if (hash === "/favorites") return renderList("favorites");
   if (hash === "/hidden") return renderList("hidden");
+  if (hash === "/admin" || hash.startsWith("/admin/")) {
+    if (!state.user.isAdmin) {
+      history.replaceState(null, "", "#/");
+      return renderList("all");
+    }
+    setActiveNav("admin");
+    return renderAdmin(hash, adminHelpers);
+  }
   return renderList("all");
 }
 
+async function loadRecipes() {
+  state.recipes = await api("/recipes");
+}
+
+const adminHelpers = {
+  main,
+  api,
+  esc,
+  toast,
+  catColor,
+  state,
+  categories: CATEGORIES.filter((c) => c !== "All"),
+  async refreshRecipes() {
+    await loadRecipes();
+    updateCounts();
+  },
+  onUnauthorized: () => signedOut(),
+};
+
 let lastHash = location.hash;
 window.addEventListener("hashchange", () => {
-  const goingToRecipe = location.hash.startsWith("#/recipe/");
+  const goingToRecipe = location.hash.startsWith("#/recipe/") || location.hash.startsWith("#/admin");
   // Switching between All / Favorites / Hidden starts with a clean search.
-  if (!goingToRecipe && !lastHash.startsWith("#/recipe/")) {
+  if (!goingToRecipe && !lastHash.startsWith("#/recipe/") && !lastHash.startsWith("#/admin")) {
     state.query = "";
     state.category = "All";
   }
   render();
-  if (goingToRecipe || lastHash.startsWith("#/recipe/")) {
+  if (goingToRecipe || lastHash.startsWith("#/recipe/") || lastHash.startsWith("#/admin")) {
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
   }
   lastHash = location.hash;
 });
 
-function signedIn() {
+async function signedIn() {
   document.body.classList.add("signed-in");
   $("#user-name").textContent = state.user.username;
   $("#site-footer").hidden = false;
+  main.innerHTML = `<div class="loading">Gathering recipes…</div>`;
+  try {
+    await loadRecipes();
+  } catch (err) {
+    if (err.status === 401) return signedOut();
+    main.innerHTML = `<div class="empty"><h2>Couldn't load recipes</h2><p>Please refresh the page.</p></div>`;
+    return;
+  }
   render();
 }
 
@@ -509,16 +558,9 @@ $("#logout-btn").addEventListener("click", async () => {
 
 (async function boot() {
   try {
-    const res = await fetch("/data/recipes.json");
-    state.recipes = await res.json();
-  } catch {
-    main.innerHTML = `<div class="empty"><h2>Couldn't load recipes</h2><p>Please refresh the page.</p></div>`;
-    return;
-  }
-  try {
     state.user = await api("/me");
-    signedIn();
   } catch {
-    renderAuth();
+    return renderAuth();
   }
+  signedIn();
 })();

@@ -1,9 +1,10 @@
 // Recipe Book API — runs as a single Netlify Function at /api/*.
-// Users, password hashes and per-user favorites/hidden lists live in Netlify Blobs,
-// so there is no external database to set up.
+// Users, password hashes, per-user favorites/hidden lists and the recipe catalog live in
+// Netlify Blobs, so there is no external database to set up.
 import { getStore } from "@netlify/blobs";
 import { scrypt, randomBytes, timingSafeEqual, createHmac } from "node:crypto";
 import { promisify } from "node:util";
+import seedRecipes from "../../data/recipes.json" with { type: "json" };
 
 const scryptAsync = promisify(scrypt);
 
@@ -13,8 +14,21 @@ const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,24}$/;
 const RECIPE_ID_RE = /^[a-z0-9-]{1,80}$/;
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 200;
+const CATEGORIES = ["Mains", "Sides", "Breads", "Desserts"];
+const RECIPES_KEY = "recipes/all";
 
 const store = () => getStore({ name: "recipe-book", consistency: "strong" });
+
+// Admins are configured in Netlify (Site configuration → Environment variables),
+// e.g. ADMIN_USERS=sharaspec,another_admin. Nobody can promote themselves from the app.
+const adminSet = () =>
+  new Set(
+    (process.env.ADMIN_USERS || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+const isAdmin = (username) => adminSet().has(String(username).toLowerCase());
 
 // ---------- helpers ----------
 
@@ -34,16 +48,18 @@ async function getSecret() {
   const s = store();
   let secret = await s.get("config/session-secret");
   if (!secret) {
-    secret = b64url(randomBytes(48));
-    await s.set("config/session-secret", secret, { onlyIfNew: true });
+    await s.set("config/session-secret", b64url(randomBytes(48)), { onlyIfNew: true });
     secret = await s.get("config/session-secret");
   }
   cachedSecret = secret;
   return secret;
 }
 
-async function signToken(username) {
-  const payload = b64url(JSON.stringify({ u: username, exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS }));
+// Tokens carry the user's session version, so a password reset signs out old sessions.
+async function signToken(user) {
+  const payload = b64url(
+    JSON.stringify({ u: user.username, v: user.sessionVersion || 0, exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS }),
+  );
   const sig = createHmac("sha256", await getSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -57,7 +73,7 @@ async function verifyToken(token) {
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
     if (!data.u || data.exp < Math.floor(Date.now() / 1000)) return null;
-    return data.u;
+    return { username: data.u, version: data.v || 0 };
   } catch {
     return null;
   }
@@ -88,8 +104,14 @@ async function checkPassword(password, user) {
   return stored.length === hash.length && timingSafeEqual(stored, hash);
 }
 
-const userKey = (username) => `users/${username.toLowerCase()}`;
-const publicUser = (u) => ({ username: u.username, favorites: u.favorites || [], hidden: u.hidden || [] });
+const validPassword = (p) => typeof p === "string" && p.length >= MIN_PASSWORD && p.length <= MAX_PASSWORD;
+const userKey = (username) => `users/${String(username).toLowerCase()}`;
+const publicUser = (u) => ({
+  username: u.username,
+  favorites: u.favorites || [],
+  hidden: u.hidden || [],
+  isAdmin: isAdmin(u.username),
+});
 
 async function readBody(req) {
   try {
@@ -111,29 +133,181 @@ function sameOrigin(req) {
 }
 
 async function currentUser(req) {
-  const username = await verifyToken(readCookie(req, COOKIE_NAME));
-  if (!username) return null;
-  const user = await store().get(userKey(username), { type: "json" });
-  return user || null;
+  const session = await verifyToken(readCookie(req, COOKIE_NAME));
+  if (!session) return null;
+  const user = await store().get(userKey(session.username), { type: "json" });
+  if (!user || (user.sessionVersion || 0) !== session.version) return null;
+  return user;
 }
 
-// ---------- route handlers ----------
+async function allUsers() {
+  const s = store();
+  const { blobs } = await s.list({ prefix: "users/" });
+  const users = await Promise.all(blobs.map((b) => s.get(b.key, { type: "json" })));
+  return users.filter(Boolean);
+}
+
+// ---------- recipes ----------
+
+async function getRecipes() {
+  const saved = await store().get(RECIPES_KEY, { type: "json" });
+  return saved || seedRecipes;
+}
+
+const saveRecipes = (recipes) => store().setJSON(RECIPES_KEY, recipes);
+
+const slugify = (s) =>
+  String(s)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "recipe";
+
+const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+const strList = (v, maxItems, maxLen) =>
+  (Array.isArray(v) ? v : typeof v === "string" ? v.split("\n") : [])
+    .map((x) => str(x, maxLen))
+    .filter(Boolean)
+    .slice(0, maxItems);
+
+// Returns { recipe } or { error }.
+function cleanRecipe(input) {
+  const r = {
+    title: str(input.title, 120),
+    category: str(input.category, 20),
+    description: str(input.description, 600),
+    author: str(input.author, 80),
+    sourceName: str(input.sourceName, 80),
+    sourceUrl: str(input.sourceUrl, 500),
+    prepTime: str(input.prepTime, 40),
+    cookTime: str(input.cookTime, 40),
+    totalTime: str(input.totalTime, 40),
+    servings: str(input.servings, 40),
+    ingredients: strList(input.ingredients, 80, 300),
+    instructions: strList(input.instructions, 60, 1500),
+    notes: strList(input.notes, 30, 600),
+  };
+  const rating = Number(input.rating);
+  const ratingCount = Number(input.ratingCount);
+  r.rating = Number.isFinite(rating) && input.rating !== "" && input.rating != null ? Math.min(5, Math.max(0, rating)) : null;
+  r.ratingCount = Number.isFinite(ratingCount) && ratingCount > 0 ? Math.floor(ratingCount) : 0;
+
+  if (!r.title) return { error: "Title is required." };
+  if (!CATEGORIES.includes(r.category)) return { error: `Category must be one of: ${CATEGORIES.join(", ")}.` };
+  if (!r.ingredients.length) return { error: "Add at least one ingredient." };
+  if (!r.instructions.length) return { error: "Add at least one instruction step." };
+  if (r.sourceUrl && !/^https?:\/\//i.test(r.sourceUrl)) return { error: "Source URL must start with http:// or https://" };
+  return { recipe: r };
+}
+
+async function listRecipes() {
+  return json(200, await getRecipes());
+}
+
+async function createRecipe(req) {
+  const { recipe, error } = cleanRecipe(await readBody(req));
+  if (error) return json(400, { error });
+  const recipes = await getRecipes();
+  const base = slugify(recipe.title);
+  let id = base;
+  for (let n = 2; recipes.some((r) => r.id === id); n++) id = `${base}-${n}`;
+  const created = { id, ...recipe };
+  await saveRecipes([...recipes, created]);
+  return json(201, created);
+}
+
+async function updateRecipe(req, id) {
+  const { recipe, error } = cleanRecipe(await readBody(req));
+  if (error) return json(400, { error });
+  const recipes = await getRecipes();
+  const i = recipes.findIndex((r) => r.id === id);
+  if (i === -1) return json(404, { error: "Recipe not found." });
+  recipes[i] = { id, ...recipe };
+  await saveRecipes(recipes);
+  return json(200, recipes[i]);
+}
+
+async function deleteRecipe(id) {
+  const recipes = await getRecipes();
+  if (!recipes.some((r) => r.id === id)) return json(404, { error: "Recipe not found." });
+  await saveRecipes(recipes.filter((r) => r.id !== id));
+  return json(200, { ok: true });
+}
+
+// ---------- admin: users & stats ----------
+
+async function listUsers() {
+  const users = await allUsers();
+  users.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  return json(
+    200,
+    users.map((u) => ({
+      username: u.username,
+      createdAt: u.createdAt,
+      favorites: (u.favorites || []).length,
+      hidden: (u.hidden || []).length,
+      isAdmin: isAdmin(u.username),
+    })),
+  );
+}
+
+async function deleteUser(admin, username) {
+  if (username.toLowerCase() === admin.username.toLowerCase()) {
+    return json(400, { error: "You can't delete your own account from the admin page." });
+  }
+  const s = store();
+  if (!(await s.get(userKey(username)))) return json(404, { error: "User not found." });
+  await s.delete(userKey(username));
+  return json(200, { ok: true });
+}
+
+async function resetPassword(req, username) {
+  const { password } = await readBody(req);
+  if (!validPassword(password)) return json(400, { error: `Password must be at least ${MIN_PASSWORD} characters.` });
+  const s = store();
+  const user = await s.get(userKey(username), { type: "json" });
+  if (!user) return json(404, { error: "User not found." });
+  Object.assign(user, await hashPassword(password));
+  user.sessionVersion = (user.sessionVersion || 0) + 1; // sign the user out everywhere
+  await s.setJSON(userKey(username), user);
+  return json(200, { ok: true });
+}
+
+async function stats() {
+  const [users, recipes] = await Promise.all([allUsers(), getRecipes()]);
+  const fav = {};
+  const hid = {};
+  for (const u of users) {
+    for (const id of u.favorites || []) fav[id] = (fav[id] || 0) + 1;
+    for (const id of u.hidden || []) hid[id] = (hid[id] || 0) + 1;
+  }
+  const perRecipe = recipes.map((r) => ({ id: r.id, title: r.title, category: r.category, favorites: fav[r.id] || 0, hidden: hid[r.id] || 0 }));
+  return json(200, {
+    users: users.length,
+    recipes: recipes.length,
+    favorites: Object.values(fav).reduce((a, b) => a + b, 0),
+    hidden: Object.values(hid).reduce((a, b) => a + b, 0),
+    recipeStats: perRecipe,
+  });
+}
+
+// ---------- auth & user routes ----------
 
 async function signup(req) {
   const { username = "", password = "" } = await readBody(req);
   if (!USERNAME_RE.test(username)) {
     return json(400, { error: "Username must be 3-24 characters: letters, numbers, _ . or -" });
   }
-  if (typeof password !== "string" || password.length < MIN_PASSWORD || password.length > MAX_PASSWORD) {
-    return json(400, { error: `Password must be at least ${MIN_PASSWORD} characters.` });
-  }
-  const { salt, hash } = await hashPassword(password);
-  const user = { username, salt, hash, favorites: [], hidden: [], createdAt: new Date().toISOString() };
+  if (!validPassword(password)) return json(400, { error: `Password must be at least ${MIN_PASSWORD} characters.` });
+  const user = { username, ...(await hashPassword(password)), favorites: [], hidden: [], sessionVersion: 0, createdAt: new Date().toISOString() };
   const result = await store().setJSON(userKey(username), user, { onlyIfNew: true });
   if (result && result.modified === false) {
     return json(409, { error: "That username is already taken." });
   }
-  return json(201, publicUser(user), { "set-cookie": sessionCookie(req, await signToken(username), SESSION_TTL_SECONDS) });
+  return json(201, publicUser(user), { "set-cookie": sessionCookie(req, await signToken(user), SESSION_TTL_SECONDS) });
 }
 
 async function login(req) {
@@ -142,9 +316,7 @@ async function login(req) {
   if (!user || typeof password !== "string" || !(await checkPassword(password, user))) {
     return json(401, { error: "Wrong username or password." });
   }
-  return json(200, publicUser(user), {
-    "set-cookie": sessionCookie(req, await signToken(user.username), SESSION_TTL_SECONDS),
-  });
+  return json(200, publicUser(user), { "set-cookie": sessionCookie(req, await signToken(user), SESSION_TTL_SECONDS) });
 }
 
 function logout(req) {
@@ -167,6 +339,8 @@ async function updateList(req, user, list, recipeId) {
   return json(200, publicUser(user));
 }
 
+// ---------- router ----------
+
 export default async (req) => {
   const path = new URL(req.url).pathname.replace(/^\/(\.netlify\/functions\/api|api)/, "").replace(/\/+$/, "");
   const method = req.method;
@@ -182,10 +356,27 @@ export default async (req) => {
     if (!user) return json(401, { error: "Not signed in." });
 
     if (path === "/me" && method === "GET") return json(200, publicUser(user));
+    if (path === "/recipes" && method === "GET") return await listRecipes();
 
-    const m = path.match(/^\/(favorites|hidden)\/([^/]+)$/);
+    let m = path.match(/^\/(favorites|hidden)\/([^/]+)$/);
     if (m && (method === "PUT" || method === "DELETE")) {
       return await updateList(req, user, m[1], decodeURIComponent(m[2]));
+    }
+
+    if (path.startsWith("/admin/")) {
+      if (!isAdmin(user.username)) return json(403, { error: "Admins only." });
+
+      if (path === "/admin/recipes" && method === "POST") return await createRecipe(req);
+      m = path.match(/^\/admin\/recipes\/([a-z0-9-]{1,80})$/);
+      if (m && method === "PUT") return await updateRecipe(req, m[1]);
+      if (m && method === "DELETE") return await deleteRecipe(m[1]);
+
+      if (path === "/admin/users" && method === "GET") return await listUsers();
+      m = path.match(/^\/admin\/users\/([a-zA-Z0-9_.-]{3,24})(\/password)?$/);
+      if (m && !m[2] && method === "DELETE") return await deleteUser(user, m[1]);
+      if (m && m[2] && method === "POST") return await resetPassword(req, m[1]);
+
+      if (path === "/admin/stats" && method === "GET") return await stats();
     }
     return json(404, { error: "Not found" });
   } catch (err) {
