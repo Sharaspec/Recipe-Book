@@ -1,5 +1,6 @@
 // Southern Recipe Book — single-page app (hash routing, no build step).
 import { renderAdmin } from "./admin.js";
+import { renderProfile, renderShared, avatarHTML } from "./profile.js";
 
 const CATEGORIES = ["All", "Mains", "Sides", "Breads", "Desserts"];
 const CAT_VAR = { Mains: "--cat-mains", Sides: "--cat-sides", Breads: "--cat-breads", Desserts: "--cat-desserts" };
@@ -46,11 +47,13 @@ const icons = {
 // ---------- API ----------
 
 async function api(path, { method = "GET", body } = {}) {
+  // Files (e.g. a profile photo) are sent as-is; everything else as JSON.
+  const isFile = body instanceof Blob;
   const res = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
-    headers: body ? { "content-type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
+    headers: body ? { "content-type": isFile ? body.type || "application/octet-stream" : "application/json" } : undefined,
+    body: body ? (isFile ? body : JSON.stringify(body)) : undefined,
   });
   let data = {};
   try {
@@ -243,14 +246,15 @@ function renderAuthError(mode, msg, username) {
   $(username ? "#password" : "#username").focus();
 }
 
-function cardHTML(r, { hiddenView = false } = {}) {
+// readOnly: no favorite/hide buttons (shared pages). linkable: title opens the full recipe.
+function cardHTML(r, { hiddenView = false, readOnly = false, linkable = true } = {}) {
   const fav = isFav(r.id);
   return `
     <article class="card">
       <div class="card-top gingham" style="--c:${catColor(r.category)}">
         <span class="cat-tag" style="--c:${catColor(r.category)}">${esc(r.category)}</span>
         ${
-          hiddenView
+          hiddenView || readOnly
             ? ""
             : `<div class="card-actions">
                 <button type="button" class="icon-btn ${fav ? "is-fav" : ""}" data-fav="${r.id}" aria-pressed="${fav}" aria-label="${fav ? "Remove from" : "Add to"} favorites: ${esc(r.title)}" title="${fav ? "Remove from favorites" : "Add to favorites"}">${icons.heart(fav)}</button>
@@ -259,14 +263,14 @@ function cardHTML(r, { hiddenView = false } = {}) {
         }
       </div>
       <div class="card-body">
-        <h2 class="card-title"><a href="#/recipe/${r.id}">${esc(r.title)}</a></h2>
+        <h2 class="card-title">${linkable ? `<a href="#/recipe/${r.id}">${esc(r.title)}</a>` : esc(r.title)}</h2>
         ${stars(r.rating, r.ratingCount)}
         <p class="card-desc">${esc(r.description)}</p>
         <div class="card-meta">
           <span>${icons.clock} ${esc(r.totalTime)}</span>
           <span>${icons.people} ${esc(r.servings)}</span>
         </div>
-        <div class="card-source">by ${esc(r.author)} · ${esc(r.sourceName)}</div>
+        ${r.author || r.sourceName ? `<div class="card-source">${[r.author && `by ${esc(r.author)}`, esc(r.sourceName)].filter(Boolean).join(" · ")}</div>` : ""}
         ${hiddenView ? `<button type="button" class="btn btn-ghost btn-sm restore-btn" data-restore="${r.id}">Restore to my book</button>` : ""}
       </div>
     </article>`;
@@ -466,9 +470,20 @@ function saveChecks(id) {
 // ---------- Routing ----------
 
 function render() {
+  const hash = location.hash.replace(/^#/, "") || "/";
+  // Shared favorites pages are public: they work signed in or not.
+  const shared = hash.match(/^\/u\/([^/]+)$/);
+  if (shared) {
+    setActiveNav(null);
+    if (state.user) updateCounts();
+    return renderShared(decodeURIComponent(shared[1]), profileHelpers);
+  }
   if (!state.user) return renderAuth();
   updateCounts();
-  const hash = location.hash.replace(/^#/, "") || "/";
+  if (hash === "/profile") {
+    setActiveNav(null);
+    return renderProfile(profileHelpers);
+  }
   const recipeMatch = hash.match(/^\/recipe\/([a-z0-9-]+)$/);
   if (recipeMatch) return renderRecipe(recipeMatch[1]);
   if (hash === "/favorites") return renderList("favorites");
@@ -503,16 +518,50 @@ const adminHelpers = {
   onUnauthorized: () => signedOut(),
 };
 
+const profileHelpers = {
+  main,
+  api,
+  esc,
+  toast,
+  state,
+  cardHTML,
+  onUnauthorized: () => signedOut(),
+  onUserUpdated: () => {
+    updateHeaderUser();
+    updateCounts();
+  },
+  onAccountDeleted: () => {
+    resetSession();
+    history.replaceState(null, "", "#/");
+    renderAuth("login");
+    toast("Your account was deleted. Sorry to see you go!");
+  },
+};
+
+function updateHeaderUser() {
+  const u = state.user;
+  $("#user-name").textContent = u.displayName || u.username;
+  $("#user-avatar").innerHTML = avatarHTML(u, esc, "sm");
+}
+
+function resetSession() {
+  state.user = null;
+  state.query = "";
+  state.category = "All";
+}
+
+const isListHash = (h) => ["", "#", "#/", "#/favorites", "#/hidden"].includes(h);
+
 let lastHash = location.hash;
 window.addEventListener("hashchange", () => {
-  const goingToRecipe = location.hash.startsWith("#/recipe/") || location.hash.startsWith("#/admin");
+  const betweenLists = isListHash(location.hash) && isListHash(lastHash);
   // Switching between All / Favorites / Hidden starts with a clean search.
-  if (!goingToRecipe && !lastHash.startsWith("#/recipe/") && !lastHash.startsWith("#/admin")) {
+  if (betweenLists) {
     state.query = "";
     state.category = "All";
   }
   render();
-  if (goingToRecipe || lastHash.startsWith("#/recipe/") || lastHash.startsWith("#/admin")) {
+  if (!betweenLists) {
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
   }
@@ -521,7 +570,7 @@ window.addEventListener("hashchange", () => {
 
 async function signedIn() {
   document.body.classList.add("signed-in");
-  $("#user-name").textContent = state.user.username;
+  updateHeaderUser();
   $("#site-footer").hidden = false;
   main.innerHTML = `<div class="loading">Gathering recipes…</div>`;
   try {
@@ -535,9 +584,7 @@ async function signedIn() {
 }
 
 function signedOut() {
-  state.user = null;
-  state.query = "";
-  state.category = "All";
+  resetSession();
   renderAuth("login", "Your session ended. Please sign in again.");
 }
 
@@ -547,9 +594,7 @@ $("#logout-btn").addEventListener("click", async () => {
   } catch {
     /* cookie is cleared server-side; ignore network errors */
   }
-  state.user = null;
-  state.query = "";
-  state.category = "All";
+  resetSession();
   history.replaceState(null, "", "#/");
   renderAuth();
 });
@@ -560,7 +605,7 @@ $("#logout-btn").addEventListener("click", async () => {
   try {
     state.user = await api("/me");
   } catch {
-    return renderAuth();
+    return render(); // sign-in screen, or a public shared page
   }
   signedIn();
 })();

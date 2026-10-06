@@ -16,6 +16,9 @@ const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 200;
 const CATEGORIES = ["Mains", "Sides", "Breads", "Desserts"];
 const RECIPES_KEY = "recipes/all";
+const MAX_AVATAR_BYTES = 512 * 1024;
+const MAX_DISPLAY_NAME = 40;
+const MAX_BIO = 280;
 
 const store = () => getStore({ name: "recipe-book", consistency: "strong" });
 
@@ -106,12 +109,37 @@ async function checkPassword(password, user) {
 
 const validPassword = (p) => typeof p === "string" && p.length >= MIN_PASSWORD && p.length <= MAX_PASSWORD;
 const userKey = (username) => `users/${String(username).toLowerCase()}`;
+const avatarKey = (username) => `avatars/${String(username).toLowerCase()}`;
+
+// Everything the signed-in user may see about their own account.
 const publicUser = (u) => ({
   username: u.username,
+  displayName: u.displayName || "",
+  bio: u.bio || "",
+  avatarVersion: u.avatarVersion || null,
+  shareFavorites: !!u.shareFavorites,
+  createdAt: u.createdAt || null,
   favorites: u.favorites || [],
   hidden: u.hidden || [],
   isAdmin: isAdmin(u.username),
 });
+
+// Strip control characters and collapse whitespace in short free-text fields.
+const cleanText = (v, max, { multiline = false } = {}) => {
+  if (typeof v !== "string") return "";
+  let t = v.replace(/\r\n?/g, "\n").replace(multiline ? /[\u0000-\u0009\u000B-\u001F\u007F]/g : /[\u0000-\u001F\u007F]/g, " ");
+  t = multiline ? t.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n") : t.replace(/\s+/g, " ");
+  return t.trim().slice(0, max);
+};
+
+// Accept only real JPEG / PNG / WebP images, checked by their file signature.
+function imageType(buf) {
+  const b = new Uint8Array(buf.slice(0, 12));
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "image/png";
+  if (String.fromCharCode(...b.slice(0, 4)) === "RIFF" && String.fromCharCode(...b.slice(8, 12)) === "WEBP") return "image/webp";
+  return null;
+}
 
 async function readBody(req) {
   try {
@@ -246,6 +274,8 @@ async function listUsers() {
     200,
     users.map((u) => ({
       username: u.username,
+      displayName: u.displayName || "",
+      avatarVersion: u.avatarVersion || null,
       createdAt: u.createdAt,
       favorites: (u.favorites || []).length,
       hidden: (u.hidden || []).length,
@@ -260,7 +290,7 @@ async function deleteUser(admin, username) {
   }
   const s = store();
   if (!(await s.get(userKey(username)))) return json(404, { error: "User not found." });
-  await s.delete(userKey(username));
+  await Promise.all([s.delete(userKey(username)), s.delete(avatarKey(username))]);
   return json(200, { ok: true });
 }
 
@@ -291,6 +321,97 @@ async function stats() {
     favorites: Object.values(fav).reduce((a, b) => a + b, 0),
     hidden: Object.values(hid).reduce((a, b) => a + b, 0),
     recipeStats: perRecipe,
+  });
+}
+
+// ---------- profile ----------
+
+async function updateProfile(req, user) {
+  const body = await readBody(req);
+  if ("displayName" in body) user.displayName = cleanText(body.displayName, MAX_DISPLAY_NAME);
+  if ("bio" in body) user.bio = cleanText(body.bio, MAX_BIO, { multiline: true });
+  if ("shareFavorites" in body) user.shareFavorites = body.shareFavorites === true;
+  await store().setJSON(userKey(user.username), user);
+  return json(200, publicUser(user));
+}
+
+async function uploadAvatar(req, user) {
+  const buf = await req.arrayBuffer();
+  if (!buf.byteLength) return json(400, { error: "No image received." });
+  if (buf.byteLength > MAX_AVATAR_BYTES) return json(413, { error: "That image is too large. Please pick one under 512 KB." });
+  const contentType = imageType(buf);
+  if (!contentType) return json(400, { error: "Please upload a JPEG, PNG or WebP image." });
+  const s = store();
+  await s.set(avatarKey(user.username), buf, { metadata: { contentType } });
+  user.avatarVersion = Date.now();
+  await s.setJSON(userKey(user.username), user);
+  return json(200, publicUser(user));
+}
+
+async function removeAvatar(user) {
+  const s = store();
+  await s.delete(avatarKey(user.username));
+  user.avatarVersion = null;
+  await s.setJSON(userKey(user.username), user);
+  return json(200, publicUser(user));
+}
+
+// Photos are visible to the owner, admins, and — when the owner shares their favorites — anyone.
+async function getAvatar(req, username) {
+  const s = store();
+  const owner = await s.get(userKey(username), { type: "json" });
+  if (!owner || !owner.avatarVersion) return json(404, { error: "No photo." });
+  if (!owner.shareFavorites) {
+    const viewer = await currentUser(req);
+    const allowed = viewer && (viewer.username.toLowerCase() === owner.username.toLowerCase() || isAdmin(viewer.username));
+    if (!allowed) return json(404, { error: "No photo." });
+  }
+  const blob = await s.getWithMetadata(avatarKey(username), { type: "arrayBuffer" });
+  if (!blob) return json(404, { error: "No photo." });
+  return new Response(blob.data, {
+    status: 200,
+    headers: {
+      "content-type": blob.metadata?.contentType || "image/jpeg",
+      "cache-control": owner.shareFavorites ? "public, max-age=86400" : "private, max-age=86400",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+async function changePassword(req, user) {
+  const { currentPassword, newPassword } = await readBody(req);
+  if (typeof currentPassword !== "string" || !(await checkPassword(currentPassword, user))) {
+    return json(400, { error: "Your current password is incorrect." });
+  }
+  if (!validPassword(newPassword)) return json(400, { error: `New password must be at least ${MIN_PASSWORD} characters.` });
+  Object.assign(user, await hashPassword(newPassword));
+  user.sessionVersion = (user.sessionVersion || 0) + 1; // signs out every other device
+  await store().setJSON(userKey(user.username), user);
+  // Keep this device signed in with a fresh session.
+  return json(200, publicUser(user), { "set-cookie": sessionCookie(req, await signToken(user), SESSION_TTL_SECONDS) });
+}
+
+async function deleteOwnAccount(req, user) {
+  const { password } = await readBody(req);
+  if (typeof password !== "string" || !(await checkPassword(password, user))) {
+    return json(400, { error: "Password is incorrect." });
+  }
+  const s = store();
+  await Promise.all([s.delete(userKey(user.username)), s.delete(avatarKey(user.username))]);
+  return json(200, { ok: true }, { "set-cookie": sessionCookie(req, "", 0) });
+}
+
+// Public, read-only favorites page — only for users who turned sharing on.
+async function sharedFavorites(username) {
+  const [owner, recipes] = await Promise.all([store().get(userKey(username), { type: "json" }), getRecipes()]);
+  if (!owner || !owner.shareFavorites) return json(404, { error: "This favorites list isn't shared." });
+  const favs = new Set(owner.favorites || []);
+  return json(200, {
+    username: owner.username,
+    displayName: owner.displayName || "",
+    bio: owner.bio || "",
+    avatarVersion: owner.avatarVersion || null,
+    recipes: recipes.filter((r) => favs.has(r.id)),
   });
 }
 
@@ -352,13 +473,24 @@ export default async (req) => {
     if (path === "/login" && method === "POST") return await login(req);
     if (path === "/logout" && method === "POST") return logout(req);
 
+    let m = path.match(/^\/shared\/([a-zA-Z0-9_.-]{3,24})$/);
+    if (m && method === "GET") return await sharedFavorites(m[1]);
+    m = path.match(/^\/avatar\/([a-zA-Z0-9_.-]{3,24})$/);
+    if (m && method === "GET") return await getAvatar(req, m[1]);
+
     const user = await currentUser(req);
     if (!user) return json(401, { error: "Not signed in." });
 
     if (path === "/me" && method === "GET") return json(200, publicUser(user));
     if (path === "/recipes" && method === "GET") return await listRecipes();
 
-    let m = path.match(/^\/(favorites|hidden)\/([^/]+)$/);
+    if (path === "/profile" && method === "PUT") return await updateProfile(req, user);
+    if (path === "/profile" && method === "DELETE") return await deleteOwnAccount(req, user);
+    if (path === "/profile/avatar" && method === "PUT") return await uploadAvatar(req, user);
+    if (path === "/profile/avatar" && method === "DELETE") return await removeAvatar(user);
+    if (path === "/profile/password" && method === "POST") return await changePassword(req, user);
+
+    m = path.match(/^\/(favorites|hidden)\/([^/]+)$/);
     if (m && (method === "PUT" || method === "DELETE")) {
       return await updateList(req, user, m[1], decodeURIComponent(m[2]));
     }

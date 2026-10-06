@@ -1,5 +1,6 @@
 // Admin page: manage recipes, users, and see usage stats.
 // Rendered by app.js for #/admin routes; the server enforces admin access on every /api/admin call.
+import { avatarHTML } from "./profile.js";
 
 export function renderAdmin(hash, h) {
   const edit = hash.match(/^\/admin\/recipe\/(new|[a-z0-9-]+)$/);
@@ -222,9 +223,9 @@ async function renderUsers(h) {
         .map(
           (u) => `
         <div class="admin-row" data-user-row="${esc(u.username)}">
-          <div class="avatar" aria-hidden="true">${esc(u.username[0].toUpperCase())}</div>
+          ${avatarHTML(u, esc, "md")}
           <div class="admin-row-main">
-            <div class="admin-row-title">${esc(u.username)} ${u.isAdmin ? '<span class="badge">Admin</span>' : ""}${
+            <div class="admin-row-title">${esc(u.displayName || u.username)}${u.displayName ? ` <span class="muted small">@${esc(u.username)}</span>` : ""} ${u.isAdmin ? '<span class="badge">Admin</span>' : ""}${
               u.username.toLowerCase() === me ? '<span class="badge badge-muted">You</span>' : ""
             }</div>
             <div class="muted small">Joined ${fmtDate(u.createdAt)} · ♥ ${u.favorites} · hidden ${u.hidden}</div>

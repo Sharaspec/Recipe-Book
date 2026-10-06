@@ -8,6 +8,12 @@ A responsive recipe book of top-rated Southern recipes, shown as easy-to-read re
 - **Themes**: Light, Dark, or System (follows your device setting), using the switch in the header.
 - **Responsive**: works on phones, tablets and desktop browsers. Recipe sheets also print cleanly.
 - **Cooking mode**: tick off ingredients and tap steps to mark them done.
+- **Profiles**: every user has a My Profile page (tap your name or photo in the header) where they can:
+  - add a profile photo, display name and short bio
+  - see when they joined and how many recipes they've favorited or hidden
+  - change their password (this signs out their other devices)
+  - delete their account
+- **Shareable favorites** (off by default): turn on "Share my favorites" to get a public link like `/#/u/yourname`. Anyone with the link can see your name, photo, bio and favorite recipes without an account. Turn it off and the link stops working.
 - **Admin page** (admins only):
   - **Recipes**: add, edit and delete recipes in the app.
   - **Users**: list everyone, reset a user's password (this signs them out everywhere), or delete an account.
@@ -42,6 +48,8 @@ Admins add, edit and delete recipes from the Admin page. `data/recipes.json` is 
 - `netlify/functions/api.mjs`: one Netlify Function serving `/api/*` (sign up, sign in, sign out, favorites, hidden).
 - `data/recipes.json`: the starting recipes, built into the function.
 - **Storage**: [Netlify Blobs](https://docs.netlify.com/blobs/overview/) holds user accounts, their favorites, and the recipe list, so there's no database to set up.
+- **Privacy**: favorites, hidden lists and profile photos are private unless a user turns on sharing. Admins can see photos in the user list.
+- **Photos**: resized to 256×256 in the browser before upload, limited to 512 KB, and only JPEG, PNG or WebP files are accepted.
 - **Security**: passwords are hashed with scrypt and never stored in plain text. Sessions use a signed, HttpOnly cookie that lasts 30 days.
 
 ## Deploy to Netlify
