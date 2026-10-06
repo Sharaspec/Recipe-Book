@@ -1,0 +1,16 @@
+{
+  "name": "recipe-book",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Southern Recipe Book \u2014 top-rated Southern recipes with accounts, favorites and light/dark/system themes. Deploys to Netlify.",
+  "type": "module",
+  "scripts": {
+    "dev": "npx netlify-cli dev"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.1.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
